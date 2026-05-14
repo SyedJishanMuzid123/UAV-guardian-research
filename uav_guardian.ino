@@ -3,70 +3,100 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/micro/micro_error_reporter.h"
-
 #include <MPU6050_tockn.h>
 #include <Wire.h>
 #include "uav_model.h"
+#include <WiFi.h>
+#include <PubSubClient.h>
 
-// --- 1. THE ARENA: Defined exactly once with 16-byte alignment ---
-// Using 90KB to stay within the ESP32's primary RAM segment limits
-// 80KB is the safe zone. 
-// It clears the 2.8KB overflow and leaves room for system globals.
-const int kTensorArenaSize = 80 * 1024; 
-uint8_t tensor_arena[kTensorArenaSize] __attribute__((aligned(16)));
+// --- 1. NETWORK CONFIG ---
+const char* ssid = "Airtel_EL_bicho_2.4ghz";
+const char* password = "air51991";
+const char* mqtt_server = "192.168.1.16"; 
 
-// --- 2. TFLite Globals ---
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// --- 2. AI GLOBALS (Modified for Dynamic Allocation) ---
+const int kTensorArenaSize = 60 * 1024; // Reduced to 60KB to fit WiFi/MQTT
+uint8_t* tensor_arena = nullptr;        // Pointer instead of array
+
 const tflite::Model* model = nullptr;
 tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
-
 MPU6050 mpu6050(Wire);
+
+// --- 3. HELPER FUNCTIONS ---
+void setup_wifi() {
+    delay(10);
+    Serial.println("\nConnecting to WiFi...");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+        Serial.print(WiFi.status());
+    }
+    Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
+}
+
+void reconnect() {
+    while (!client.connected()) {
+        Serial.print("Attempting MQTT connection...");
+        if (client.connect("UAV_Guardian_AEC")) {
+            Serial.println("connected");
+        } else {
+            Serial.print("failed, rc=");
+            Serial.print(client.state());
+            delay(5000);
+        }
+    }
+}
 
 void setup() {
     Serial.begin(115200);
-    delay(3000);
-    Serial.println("--- UAV-GUARDIAN: AEC STABLE DEPLOYMENT ---");
+    delay(2000);
 
-    // 3. Diagnostic: Check for memory fragmentation
-    Serial.printf("Total Free Heap: %d bytes\n", ESP.getFreeHeap());
-    Serial.printf("Largest Contiguous Block: %d bytes\n", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // DYNAMICALLY ALLOCATE ARENA (Fixes the Linker Error)
+    tensor_arena = (uint8_t*)malloc(kTensorArenaSize);
+    if (tensor_arena == nullptr) {
+        Serial.println("CRITICAL: Could not allocate arena!");
+        while(1);
+    }
 
+    setup_wifi();
+    client.setServer(mqtt_server, 1883);
+
+    Serial.println("--- UAV-GUARDIAN: AEC DEPLOYMENT ---");
     Wire.begin(); 
     mpu6050.begin();
     mpu6050.calcGyroOffsets(true); 
 
-    // 4. Setup Error Reporting & Model
     static tflite::MicroErrorReporter micro_error_reporter;
-    tflite::ErrorReporter* error_reporter = &micro_error_reporter;
-
     model = tflite::GetModel(uav_model_tflite);
-    if (model->version() != TFLITE_SCHEMA_VERSION) {
-        Serial.println("Model version mismatch!");
-        while (1);
-    }
-
-    // 5. Opcode Resolver: Loads everything including EXPAND_DIMS
     static tflite::AllOpsResolver resolver;
 
-    // 6. Initialize Interpreter
+    // Initialize interpreter with the dynamically allocated pointer
     static tflite::MicroInterpreter static_interpreter(
-        model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
+        model, resolver, tensor_arena, kTensorArenaSize, &micro_error_reporter);
     interpreter = &static_interpreter;
 
-    Serial.println("Attempting to Allocate Tensors...");
     if (interpreter->AllocateTensors() != kTfLiteOk) {
-        Serial.println("CRITICAL: Allocation Failed! Check logs above.");
-        while (1) delay(100);
+        Serial.println("Inference Allocation Failed! Arena might be too small.");
+        while (1);
     }
 
     input = interpreter->input(0);
     output = interpreter->output(0);
-    Serial.println("--- AI ENGINE ONLINE: READY ---");
+    Serial.println("--- AI ENGINE ONLINE ---");
 }
 
 void loop() {
-    // Collect 100 samples (X, Y, Z) = 300 inputs
+    if (!client.connected()) {
+        reconnect();
+    }
+    client.loop();
+
     for (int i = 0; i < 100; i++) {
         mpu6050.update();
         if (input != nullptr) {
@@ -77,22 +107,16 @@ void loop() {
         delay(10); 
     }
 
-    // Run the 1D-CNN Inference
-    if (interpreter->Invoke() != kTfLiteOk) {
-        Serial.println("Inference execution failed!");
-        return;
-    }
+    if (interpreter->Invoke() != kTfLiteOk) { return; }
 
-    // Healthy (0) vs Faulty (1)
     float healthy = output->data.f[0];
     float faulty  = output->data.f[1];
 
-    Serial.print("H: "); Serial.print(healthy * 100, 1); Serial.print("% | ");
-    Serial.print("F: "); Serial.print(faulty * 100, 1); Serial.println("%");
+    Serial.print("H: "); Serial.print(healthy * 100, 1);
+    Serial.print("% | F: "); Serial.print(faulty * 100, 1); Serial.println("%");
 
-    if (faulty > 0.85) {
-        Serial.println("🚨 ALERT: ANOMALY DETECTED!");
-    }
-    
+    String payload = "H:" + String(healthy * 100, 1) + " F:" + String(faulty * 100, 1);
+    client.publish("uav/guardian/health", payload.c_str());
+
     delay(500); 
 }
