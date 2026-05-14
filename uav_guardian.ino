@@ -115,6 +115,20 @@ void loop() {
     Serial.print("H: "); Serial.print(healthy * 100, 1);
     Serial.print("% | F: "); Serial.print(faulty * 100, 1); Serial.println("%");
 
+    // --- [ADD THIS BLOCK] ---
+    if (faulty > 0.85) {
+        // 1. Local Alert
+        Serial.println("🚨 ALERT: ANOMALY DETECTED!");
+        
+        // 2. MQTT Alert (To a separate priority topic)
+        client.publish("uav/guardian/alerts", "CRITICAL: High vibration detected!");
+        
+        // 3. Optional: Visual Alert (if you have an LED on Pin 2)
+        // digitalWrite(2, HIGH); 
+    } else {
+        // digitalWrite(2, LOW);
+    }
+
     String payload = "H:" + String(healthy * 100, 1) + " F:" + String(faulty * 100, 1);
     client.publish("uav/guardian/health", payload.c_str());
 
