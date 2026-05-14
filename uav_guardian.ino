@@ -12,15 +12,14 @@
 // --- 1. NETWORK CONFIG ---
 const char* ssid = "Airtel_EL_bicho_2.4ghz";
 const char* password = "air51991";
-// Use a Public Broker if 192.168.1.22 (Local) gives rc=-2
-//const char* mqtt_server = "broker.hivemq.com"; 
-const char* mqtt_server = "192.168.1.22";
+const char* mqtt_server = "192.168.1.16"; 
+
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// --- 2. AI GLOBALS ---
-const int kTensorArenaSize = 60 * 1024; 
-uint8_t* tensor_arena = nullptr;
+// --- 2. AI GLOBALS (Modified for Dynamic Allocation) ---
+const int kTensorArenaSize = 60 * 1024; // Reduced to 60KB to fit WiFi/MQTT
+uint8_t* tensor_arena = nullptr;        // Pointer instead of array
 
 const tflite::Model* model = nullptr;
 tflite::MicroInterpreter* interpreter = nullptr;
@@ -28,6 +27,7 @@ TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 MPU6050 mpu6050(Wire);
 
+// --- 3. HELPER FUNCTIONS ---
 void setup_wifi() {
     delay(10);
     Serial.println("\nConnecting to WiFi...");
@@ -35,6 +35,7 @@ void setup_wifi() {
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
+        Serial.print(WiFi.status());
     }
     Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
 }
@@ -42,13 +43,11 @@ void setup_wifi() {
 void reconnect() {
     while (!client.connected()) {
         Serial.print("Attempting MQTT connection...");
-        // Unique ID for the broker
-        if (client.connect("UAV_Guardian_AEC_Final")) {
+        if (client.connect("UAV_Guardian_AEC")) {
             Serial.println("connected");
         } else {
             Serial.print("failed, rc=");
             Serial.print(client.state());
-            Serial.println(" (Check Firewall/Port 1883)");
             delay(5000);
         }
     }
@@ -56,16 +55,19 @@ void reconnect() {
 
 void setup() {
     Serial.begin(115200);
-    
-    // Allocate memory for AI
+    delay(2000);
+
+    // DYNAMICALLY ALLOCATE ARENA (Fixes the Linker Error)
     tensor_arena = (uint8_t*)malloc(kTensorArenaSize);
     if (tensor_arena == nullptr) {
-        while(1) { Serial.println("Arena Allocation Failed!"); delay(1000); }
+        Serial.println("CRITICAL: Could not allocate arena!");
+        while(1);
     }
 
     setup_wifi();
     client.setServer(mqtt_server, 1883);
 
+    Serial.println("--- UAV-GUARDIAN: AEC DEPLOYMENT ---");
     Wire.begin(); 
     mpu6050.begin();
     mpu6050.calcGyroOffsets(true); 
@@ -74,24 +76,27 @@ void setup() {
     model = tflite::GetModel(uav_model_tflite);
     static tflite::AllOpsResolver resolver;
 
+    // Initialize interpreter with the dynamically allocated pointer
     static tflite::MicroInterpreter static_interpreter(
         model, resolver, tensor_arena, kTensorArenaSize, &micro_error_reporter);
     interpreter = &static_interpreter;
 
     if (interpreter->AllocateTensors() != kTfLiteOk) {
-        while (1) { Serial.println("Tensor Allocation Failed!"); delay(1000); }
+        Serial.println("Inference Allocation Failed! Arena might be too small.");
+        while (1);
     }
 
     input = interpreter->input(0);
     output = interpreter->output(0);
-    Serial.println("--- UAV-GUARDIAN AI ONLINE ---");
+    Serial.println("--- AI ENGINE ONLINE ---");
 }
 
 void loop() {
-    if (!client.connected()) reconnect();
+    if (!client.connected()) {
+        reconnect();
+    }
     client.loop();
 
-    // Data Collection: Raw 3-axis input (100 samples x 3 axes = 300 inputs)
     for (int i = 0; i < 100; i++) {
         mpu6050.update();
         if (input != nullptr) {
@@ -102,20 +107,24 @@ void loop() {
         delay(10); 
     }
 
-    // Run AI Inference
-    if (interpreter->Invoke() != kTfLiteOk) return;
+    if (interpreter->Invoke() != kTfLiteOk) { return; }
 
-    float result = output->data.f[0]; // Sigmoid output (0.0 to 1.0)
+    float healthy = output->data.f[0];
+    float faulty  = output->data.f[1];
 
-    Serial.print("Vibration Score: "); Serial.println(result, 4);
+    Serial.print("H: "); Serial.print(healthy * 100, 1);
+    Serial.print("% | F: "); Serial.print(faulty * 100, 1); Serial.println("%");
 
-    // Send Alert based on Threshold
-    String status = (result > 0.80) ? "ANOMALY" : "HEALTHY";
-    String payload = "{\"val\":" + String(result, 4) + ", \"status\":\"" + status + "\"}";
-    
+    // --- [ADD THIS BLOCK] ---
+   // Create a simple string message to send to your laptop
+    String msg = "H:" + String(healthy*100,1) + " F:" + String(faulty*100,1);
+    if (faulty > 0.85) {
+        msg += " [ALERT]";
+        Serial.println("🚨 ALERT: ANOMALY DETECTED!");
+    }
+
+    String payload = "H:" + String(healthy * 100, 1) + " F:" + String(faulty * 100, 1);
     client.publish("uav/guardian/health", payload.c_str());
 
-    if (result > 0.80) Serial.println("🚨 ALERT: ANOMALY DETECTED!");
-    
     delay(500); 
 }

@@ -50,3 +50,7 @@ To deploy the Python model onto the ESP32, we performed:
 ## 🚀 Future Scope
 * **Phase 3:** Wireless "Red Alert" telemetry via **MQTT**.
 * **Phase 4:** **InfluxDB & Grafana** dashboard for historical health analytics.
+
+## MQTTP set up
+* "mosquitto -v -c mosquitto.conf" on 
+* "mosquitto_sub -h [YOUR_LAPTOP_IP] -t "uav/guardian/health""
